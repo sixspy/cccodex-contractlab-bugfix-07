@@ -32,6 +32,21 @@ Schema 契约版本约束入站校验，破坏性变更进缓冲或拒收，并�
 - 影子只读试跑 vs 双轨分开展示
 - 契约回滚整版原子切换 vs 按生产者摘流
 
+## 拒收副作用（收暑双路径）
+
+拒收不得推进通过计数。收暑当天选定后写入 `拒收副作用簿`（表 `reject_side_effect_book`），当天禁止改口；
+偏离即拒绝并记「副作用偏了」（表 `side_effect_events`）。
+
+| 收暑 | 拒收怎么写 | 对账怎么核 |
+|------|------------|------------|
+| 乙（默认） | 拒收批次写入 `ingress_batches.reject_snapshot` 拒收前值列 | 排除拒收批次现场重算，与落库账册逐日比对 |
+| 甲 | 只追加拒收批次与原因，前值留在副作用簿事件 | 快照保持拒收前值 |
+
+- 计数落库可核：`reconcile_ledger` 按天持久化通过/拒收/缓冲/入站，`/api/reconcile` 返回 `ledger_ok`、`snapshot_passed`、`passed_excl_reject`。
+- 拒收与通过同抢写排队：`/api/ingress/validate` 共用一道门，后到只记「路径争用」，不另起通过计数。
+- 同源：`/api/ingress`、`/api/rejects`、`/api/review-queue`、`/api/reject-policy`、`/api/reconcile` 均读同一批拒收批次。
+- 不改库文件：`init_db()` 对现行 `data/app.db` 原地加列建表。
+
 ## 启动（一键）
 
 `powershell

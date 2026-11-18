@@ -30,6 +30,9 @@
   .pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .stamp{display:inline-block;border:1.5px solid var(--ok);color:var(--ok);padding:2px 8px;font-size:12px}
   .stamp.bad{border-color:var(--bad);color:var(--bad)}
+  .kv{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;margin:0 0 8px}
+  .kv b{font-weight:600}
+  .warn{color:var(--bad);font-size:13px;margin:4px 0 10px}
 </style>
 </head>
 <body>
@@ -52,7 +55,7 @@ createApp({
     const token=ref(localStorage.getItem('contractlab_token')||'');
     const user=ref(localStorage.getItem('contractlab_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({});
+    const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({}), rejects=ref([]), policy=ref({});
     const form=ref({subject:'订单入站', payload_fields:'order_id,amount'});
     const nav=['契约版本','入站校验','双写缓冲','契约对账'];
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
@@ -81,6 +84,11 @@ createApp({
       buffers.value=Array.isArray(u.items)?u.items:[];
       const q=await loadJson('/api/reconcile'); if(q===null) return;
       recon.value=q&&typeof q==='object'?q:{};
+      // 拒收详情、复核队列、策略附页与对账账册同源，均直接读同一批拒收批次。
+      const j=await loadJson('/api/rejects'); if(j===null) return;
+      rejects.value=Array.isArray(j.items)?j.items:[];
+      const p=await loadJson('/api/reject-policy'); if(p===null) return;
+      policy.value=p&&typeof p==='object'?p:{};
     }
     async function validate(){
       actionErr.value='';
@@ -88,8 +96,9 @@ createApp({
       const j=await r.json(); actionErr.value=r.ok?('校验结果：'+j.result+(j.missing?('；缺 '+j.missing.join(',')):'')):(j.detail||'失败');
       await refresh();
     }
+    function snapPassed(v){ return v===null||v===undefined?'—':v; }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate};
+    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,rejects,policy,form,actionErr,login,logout,validate,snapPassed};
   },
   template:`
   <div v-if="!token" class="login">
@@ -124,10 +133,10 @@ createApp({
       </div>
       <div class="card">
         <h2>最近批次</h2>
-        <table><thead><tr><th>批次</th><th>结果</th><th>说明</th></tr></thead>
+        <table><thead><tr><th>批次</th><th>结果 / 收暑</th><th>说明</th></tr></thead>
         <tbody><tr v-for="b in (batches||[]).slice(0,8)" :key="b.id">
           <td>#{{b.id}} {{b.subject}}</td>
-          <td><span class="stamp" :class="{bad:b.result!=='通过'}">{{b.result}}</span></td>
+          <td><span class="stamp" :class="{bad:b.result!=='通过'}">{{b.result}}</span> {{b.strategy||'—'}}</td>
           <td>{{b.detail}}</td>
         </tr></tbody></table>
       </div>
@@ -137,9 +146,51 @@ createApp({
       <table><thead><tr><th>缓冲</th><th>批次</th><th>主题</th><th>原因</th></tr></thead>
       <tbody><tr v-for="b in buffers" :key="b.id"><td>{{b.id}}</td><td>{{b.batch_id}}</td><td>{{b.subject}}</td><td>{{b.reason}}</td></tr></tbody></table>
     </div>
-    <div class="card" v-show="tab===3">
-      <h2>契约对账摘要</h2>
-      <p>入站 {{recon.ingress_total}} · 通过 {{recon.passed}} · 缓冲 {{recon.buffered}} · 拒收 {{recon.rejected}} · 缓冲行 {{recon.buffer_rows}} · 对齐 {{recon.aligned}}</p>
+    <div v-show="tab===3">
+      <div class="card">
+        <h2>契约对账摘要</h2>
+        <div class="kv">
+          <span>入站 <b>{{recon.ingress_total}}</b></span>
+          <span>通过 <b>{{recon.passed}}</b></span>
+          <span>缓冲 <b>{{recon.buffered}}</b></span>
+          <span>拒收 <b>{{recon.rejected}}</b></span>
+          <span>缓冲行 <b>{{recon.buffer_rows}}</b></span>
+          <span>对齐 <b>{{recon.aligned}}</b></span>
+        </div>
+        <div class="kv">
+          <span>拒收副作用簿 <b>{{recon.side_effect_book}}</b></span>
+          <span>收暑 <b>{{recon.strategy}}</b></span>
+          <span>拒收前通过快照 <b>{{snapPassed(recon.snapshot_passed)}}</b></span>
+          <span>排除拒收重算通过 <b>{{recon.passed_excl_reject}}</b></span>
+          <span>账册落库 <b>{{recon.ledger_persisted}}</b></span>
+          <span>副作用净 <b>{{recon.reject_side_effect_clean}}</b></span>
+        </div>
+        <div class="warn" v-if="recon.reject_side_effect_violations && recon.reject_side_effect_violations.length">
+          拒收副作用越界：{{recon.reject_side_effect_violations.length}} 笔
+        </div>
+        <p class="meta">{{recon.reconcile_path}}</p>
+      </div>
+      <div class="card">
+        <h2>拒收详情</h2>
+        <table><thead><tr><th>批次</th><th>主题 / 原因</th><th>收暑</th><th>拒收前通过</th><th>复核</th></tr></thead>
+        <tbody><tr v-for="r in rejects" :key="r.batch_id">
+          <td>#{{r.batch_id}}</td>
+          <td>{{r.subject}} · {{r.reason}}</td>
+          <td>{{r.strategy||'—'}}</td>
+          <td>{{r.snapshot?snapPassed(r.snapshot.passed):'—'}}</td>
+          <td>{{r.review_status}}</td>
+        </tr></tbody></table>
+      </div>
+      <div class="card">
+        <h2>拒收副作用簿</h2>
+        <div class="meta" v-if="policy.book && policy.book.length">
+          今日收暑：{{policy.strategy||'未选'}}；偏离即拒并记副作用偏了。
+        </div>
+        <table><thead><tr><th>类型</th><th>说明</th><th>路径</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="e in (policy.events||[]).slice(0,8)" :key="e.seq">
+          <td>{{e.kind}}</td><td>{{e.detail}}</td><td>{{e.path||'—'}}</td><td>{{e.created_at}}</td>
+        </tr></tbody></table>
+      </div>
     </div>
   </div>`
 }).mount('#app');
